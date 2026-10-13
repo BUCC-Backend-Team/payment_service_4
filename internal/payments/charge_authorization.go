@@ -11,6 +11,8 @@ import (
 
 const caURL = "https://api.paystack.co/transaction/initialize"
 
+var sendRequest = SendRequest
+
 type caBody struct {
 	Amount   int64  `json:"amount"`
 	Email    string `json:"email"`
@@ -65,7 +67,7 @@ func chargeAuthorization(
 		"Accept":        "application/json",
 	}
 
-	res, err := SendRequest(ctx, caURL, "POST", data, headers)
+	res, err := sendRequest(ctx, caURL, "POST", data, headers)
 	if err != nil {
 		if cfg.logger != nil {
 			cfg.logger.Error("failed to initialize Paystack transaction", "err", err)
