@@ -1,0 +1,17 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "sql/queries"
+    schema: "sql/schema"
+    gen:
+      go:
+        out: "internal/database"
+        overrides:
+          - db_type: "text[]"
+            nullable: false
+            go_type:
+              import: "github.com/lib/pq"
+              type: "StringArray"
+          - db_type: "jsonb"
+            nullable: false
+            go_type: "encoding/json.RawMessage"

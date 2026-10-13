@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/payments"
 )
 
 type config struct {
 	logger *slog.Logger
-	// db *database.Queries
+	db *database.Queries
 	DB *sql.DB
 }
 
@@ -73,11 +75,16 @@ func run () {
 	}
 	defer db.Close()
 
+	paystackSecretKey := viper.GetString("PAYSTACK_SECRET_KEY")
+	merchantApiKey := viper.GetString("MERCHANT_API_KEY")
+
 	cfg = &config{
 		logger: logger,
-		// db: database.New(db),
+		db: database.New(db),
 		DB: db,
 	}
+
+	payments.New(paystackSecretKey, logger, cfg.db, db, merchantApiKey)
 
 	mux := http.NewServeMux()
 	registerRoutes(mux)

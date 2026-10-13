@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/payments"
 )
 
 func HandleHealth(w http.ResponseWriter, r *http.Request) {
@@ -12,5 +14,9 @@ func HandleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/health", HandleHealth)
+	mux.HandleFunc("GET /health", HandleHealth)
+
+	mux.HandleFunc("POST /webhooks/paystack", payments.HandleWebhook)
+
+	mux.HandleFunc("POST /payments", payments.MakePaymentHandler)
 }
