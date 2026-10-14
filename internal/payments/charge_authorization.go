@@ -32,12 +32,7 @@ type caResponse struct {
 	Data    caData `json:"data"`
 }
 
-func chargeAuthorization(
-	ctx context.Context,
-	amount int64,
-	email string,
-	reference string,
-) (caResponse, error) {
+func chargeAuthorization(ctx context.Context, amount int64, email string, reference string) (caResponse, error) {
 	if cfg == nil {
 		return caResponse{}, errors.New("payment service is not initialized")
 	}

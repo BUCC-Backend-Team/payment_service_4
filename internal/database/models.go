@@ -18,6 +18,7 @@ type Payment struct {
 	Amount            int64
 	Currency          string
 	CustomerEmail     string
+	ReturnUrl         string
 	Status            string
 	Channel           sql.NullString
 	PaystackReference string

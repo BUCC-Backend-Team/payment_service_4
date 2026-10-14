@@ -19,4 +19,6 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /webhooks/paystack", payments.HandleWebhook)
 
 	mux.HandleFunc("POST /payments", payments.MakePaymentHandler)
+
+	mux.HandleFunc("GET /payments/{id}", payments.GetPaymentByIdHandler)
 }

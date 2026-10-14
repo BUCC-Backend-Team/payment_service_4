@@ -11,9 +11,10 @@ INSERT INTO payments (
     amount,
     currency,
     customer_email,
-    paystack_reference
+    paystack_reference,
+    return_url
 )
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING *;
 
@@ -27,3 +28,26 @@ SET
 WHERE id = $1
     AND status = 'pending'
 RETURNING *;
+
+-- name: GetPaymentByPaystackReference :one
+SELECT *
+FROM payments
+WHERE paystack_reference = $1
+LIMIT 1;
+
+-- name: MarkPaymentSucceeded :one
+UPDATE payments
+SET status = 'succeeded',
+    channel = $4,
+    updated_at = NOW()
+WHERE paystack_reference = $1
+  AND amount = $2
+  AND currency = $3
+  AND status = 'pending'
+RETURNING *;
+
+-- name: GetPaymentById :one
+SELECT status, channel, amount
+FROM payments
+WHERE id = $1
+LIMIT 1;

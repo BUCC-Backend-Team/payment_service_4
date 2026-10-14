@@ -6,9 +6,10 @@ CREATE TABLE IF NOT EXISTS payments (
     amount BIGINT NOT NULL CHECK (amount > 0),
     currency TEXT NOT NULL DEFAULT 'NGN' CHECK (currency = 'NGN'),
     customer_email TEXT NOT NULL,
+    return_url TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
         'pending',
-        'success',
+        'succeeded',
         'expired',
         'partially_refunded',
         'refunded'

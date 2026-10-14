@@ -19,11 +19,12 @@ INSERT INTO payments (
     amount,
     currency,
     customer_email,
-    paystack_reference
+    paystack_reference,
+    return_url
 )
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, idempotency_key, order_id, amount, currency, customer_email, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+RETURNING id, idempotency_key, order_id, amount, currency, customer_email, return_url, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
 `
 
 type CreatePaymentParams struct {
@@ -33,6 +34,7 @@ type CreatePaymentParams struct {
 	Currency          string
 	CustomerEmail     string
 	PaystackReference string
+	ReturnUrl         string
 }
 
 func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (Payment, error) {
@@ -43,6 +45,7 @@ func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (P
 		arg.Currency,
 		arg.CustomerEmail,
 		arg.PaystackReference,
+		arg.ReturnUrl,
 	)
 	var i Payment
 	err := row.Scan(
@@ -52,6 +55,7 @@ func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (P
 		&i.Amount,
 		&i.Currency,
 		&i.CustomerEmail,
+		&i.ReturnUrl,
 		&i.Status,
 		&i.Channel,
 		&i.PaystackReference,
@@ -66,8 +70,28 @@ func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (P
 	return i, err
 }
 
+const getPaymentById = `-- name: GetPaymentById :one
+SELECT status, channel, amount
+FROM payments
+WHERE id = $1
+LIMIT 1
+`
+
+type GetPaymentByIdRow struct {
+	Status  string
+	Channel sql.NullString
+	Amount  int64
+}
+
+func (q *Queries) GetPaymentById(ctx context.Context, id uuid.UUID) (GetPaymentByIdRow, error) {
+	row := q.db.QueryRowContext(ctx, getPaymentById, id)
+	var i GetPaymentByIdRow
+	err := row.Scan(&i.Status, &i.Channel, &i.Amount)
+	return i, err
+}
+
 const getPaymentByIdempotencyKey = `-- name: GetPaymentByIdempotencyKey :one
-SELECT id, idempotency_key, order_id, amount, currency, customer_email, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+SELECT id, idempotency_key, order_id, amount, currency, customer_email, return_url, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
 FROM payments
 WHERE idempotency_key = $1
 LIMIT 1
@@ -83,6 +107,88 @@ func (q *Queries) GetPaymentByIdempotencyKey(ctx context.Context, idempotencyKey
 		&i.Amount,
 		&i.Currency,
 		&i.CustomerEmail,
+		&i.ReturnUrl,
+		&i.Status,
+		&i.Channel,
+		&i.PaystackReference,
+		&i.CheckoutUrl,
+		&i.AccessCode,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+		&i.SucceededAt,
+		&i.ExpiredAt,
+	)
+	return i, err
+}
+
+const getPaymentByPaystackReference = `-- name: GetPaymentByPaystackReference :one
+SELECT id, idempotency_key, order_id, amount, currency, customer_email, return_url, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+FROM payments
+WHERE paystack_reference = $1
+LIMIT 1
+`
+
+func (q *Queries) GetPaymentByPaystackReference(ctx context.Context, paystackReference string) (Payment, error) {
+	row := q.db.QueryRowContext(ctx, getPaymentByPaystackReference, paystackReference)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.IdempotencyKey,
+		&i.OrderID,
+		&i.Amount,
+		&i.Currency,
+		&i.CustomerEmail,
+		&i.ReturnUrl,
+		&i.Status,
+		&i.Channel,
+		&i.PaystackReference,
+		&i.CheckoutUrl,
+		&i.AccessCode,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+		&i.SucceededAt,
+		&i.ExpiredAt,
+	)
+	return i, err
+}
+
+const markPaymentSucceeded = `-- name: MarkPaymentSucceeded :one
+UPDATE payments
+SET status = 'succeeded',
+    channel = $4,
+    updated_at = NOW()
+WHERE paystack_reference = $1
+  AND amount = $2
+  AND currency = $3
+  AND status = 'pending'
+RETURNING id, idempotency_key, order_id, amount, currency, customer_email, return_url, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+`
+
+type MarkPaymentSucceededParams struct {
+	PaystackReference string
+	Amount            int64
+	Currency          string
+	Channel           sql.NullString
+}
+
+func (q *Queries) MarkPaymentSucceeded(ctx context.Context, arg MarkPaymentSucceededParams) (Payment, error) {
+	row := q.db.QueryRowContext(ctx, markPaymentSucceeded,
+		arg.PaystackReference,
+		arg.Amount,
+		arg.Currency,
+		arg.Channel,
+	)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.IdempotencyKey,
+		&i.OrderID,
+		&i.Amount,
+		&i.Currency,
+		&i.CustomerEmail,
+		&i.ReturnUrl,
 		&i.Status,
 		&i.Channel,
 		&i.PaystackReference,
@@ -106,7 +212,7 @@ SET
     updated_at = NOW()
 WHERE id = $1
     AND status = 'pending'
-RETURNING id, idempotency_key, order_id, amount, currency, customer_email, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+RETURNING id, idempotency_key, order_id, amount, currency, customer_email, return_url, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
 `
 
 type UpdatePaymentCheckoutParams struct {
@@ -131,6 +237,7 @@ func (q *Queries) UpdatePaymentCheckout(ctx context.Context, arg UpdatePaymentCh
 		&i.Amount,
 		&i.Currency,
 		&i.CustomerEmail,
+		&i.ReturnUrl,
 		&i.Status,
 		&i.Channel,
 		&i.PaystackReference,

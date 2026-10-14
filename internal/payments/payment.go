@@ -12,21 +12,27 @@ import (
 )
 
 type MakePaymentRequest struct {
-	OrderID        string
-	IdempotencyKey string
-	Amount         int64
-	CustomerEmail  string
+	OrderID        string `json:"orderId"`
+	IdempotencyKey string `json:"Idempotency-Key"`
+	Amount         int64 `json:"amount"`
+	CustomerEmail  string `json:"customerEmail"`
+	ReturnUrl string `json:"returnUrl"`
+	Currency string `json:"currency"`
 }
 
 type MakePaymentResponse struct {
-	PaymentID   string `json:"payment_id"`
-	OrderID     string `json:"order_id"`
-	Reference   string `json:"reference"`
+	PaymentID   string `json:"paymentId"`
+	OrderID     string `json:"orderId"`
+	Status      string `json:"status"`
 	Amount      int64  `json:"amount"`
 	Currency    string `json:"currency"`
-	Status      string `json:"status"`
-	CheckoutURL string `json:"checkout_url"`
-	AccessCode  string `json:"access_code"`
+	CheckoutURL string `json:"checkoutUrl"`
+}
+
+type GetPaymentByIdResponse struct {
+	Status string `json:"status"`
+	Channel string `json:"channel"`
+	AmountRefunded uint `json:"amountRefunded"`
 }
 
 func makePayment(ctx context.Context, req MakePaymentRequest) (MakePaymentResponse, error) {
@@ -41,8 +47,9 @@ func makePayment(ctx context.Context, req MakePaymentRequest) (MakePaymentRespon
 	if req.OrderID == "" ||
 		req.IdempotencyKey == "" ||
 		req.CustomerEmail == "" ||
+		req.ReturnUrl == "" ||
 		req.Amount <= 0 {
-		return MakePaymentResponse{}, errors.New("order ID, idempotency key, customer email, and positive amount are required")
+		return MakePaymentResponse{}, errors.New("order ID, idempotency key, customer email, returnUrl and positive amount are required")
 	}
 
 	if strings.ContainsAny(req.CustomerEmail, " \t\r\n") ||
@@ -50,7 +57,14 @@ func makePayment(ctx context.Context, req MakePaymentRequest) (MakePaymentRespon
 		return MakePaymentResponse{}, errors.New("a valid customer email is required")
 	}
 
-	const currency = "NGN"
+	var currency string
+	if req.Currency == "" {
+		currency = "NGN"
+	}
+
+	if req.Currency != "" && req.Currency != "NGN" {
+		return MakePaymentResponse{}, errors.New("currency must be NGN")
+	}
 
 	payment, err := cfg.db.GetPaymentByIdempotencyKey(ctx, req.IdempotencyKey)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -67,6 +81,7 @@ func makePayment(ctx context.Context, req MakePaymentRequest) (MakePaymentRespon
 			Currency:         currency,
 			CustomerEmail:    req.CustomerEmail,
 			PaystackReference: reference,
+			ReturnUrl: req.ReturnUrl,
 		})
 		if err != nil {
 			createdPayment, getErr := cfg.db.GetPaymentByIdempotencyKey(ctx, req.IdempotencyKey)
@@ -95,15 +110,10 @@ func makePayment(ctx context.Context, req MakePaymentRequest) (MakePaymentRespon
 		response := MakePaymentResponse{
 			PaymentID:   payment.ID.String(),
 			OrderID:     payment.OrderID,
-			Reference:   payment.PaystackReference,
 			Amount:      payment.Amount,
 			Currency:    payment.Currency,
 			Status:      payment.Status,
 			CheckoutURL: payment.CheckoutUrl.String,
-		}
-
-		if payment.AccessCode.Valid {
-			response.AccessCode = payment.AccessCode.String
 		}
 
 		return response, nil
@@ -132,11 +142,39 @@ func makePayment(ctx context.Context, req MakePaymentRequest) (MakePaymentRespon
 	return MakePaymentResponse{
 		PaymentID:   updated.ID.String(),
 		OrderID:     updated.OrderID,
-		Reference:   updated.PaystackReference,
 		Amount:      updated.Amount,
 		Currency:    updated.Currency,
 		Status:      updated.Status,
 		CheckoutURL: paystackRes.Data.AuthorizationUrl,
-		AccessCode:  paystackRes.Data.AccessCode,
+	}, nil
+}
+
+
+func GetPaymentByID(ctx context.Context, paymentId string) (GetPaymentByIdResponse, error) {
+	if cfg == nil || cfg.db == nil {
+		return GetPaymentByIdResponse{}, errors.New("payment service is not initialized")
+	}
+
+	if paymentId == "" {
+		return GetPaymentByIdResponse{}, errors.New("payment id not provided")
+	}
+
+	pId, err := uuid.Parse(paymentId)
+	if err != nil {
+		return GetPaymentByIdResponse{}, errors.New("invalid payment id")
+	}
+
+	payment, err := cfg.db.GetPaymentById(ctx, pId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return GetPaymentByIdResponse{}, errors.New("payment not found")
+		}
+		return GetPaymentByIdResponse{}, errors.New("failed to fetch payment")
+	}
+
+	return GetPaymentByIdResponse{
+		Status: payment.Status,
+		Channel: payment.Channel.String,
+		AmountRefunded: uint(payment.Amount),
 	}, nil
 }
