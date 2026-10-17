@@ -12,10 +12,10 @@ type Checkout struct {
 }
 
 type InitializeRequest struct {
-	Reference  string
-	Amount     int64
-	Currency   string
-	Email      string
+	Reference   string
+	Amount      int64
+	Currency    string
+	Email       string
 	CallbackURL string
 }
 
@@ -47,7 +47,6 @@ func IsAmbiguous(err error) bool {
 	}
 	return call.Class == ClassAmbiguous
 }
-
 
 type Provider interface {
 	InitializeTransaction(ctx context.Context, req InitializeRequest) (Checkout, error)

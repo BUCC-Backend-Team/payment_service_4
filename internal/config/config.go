@@ -30,6 +30,10 @@ const (
 )
 
 func Load() (*Config, error) {
+	if err := loadDotEnv(".env"); err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Port:                  envString("PORT", defaultPort),
 		DatabaseURL:           strings.TrimSpace(os.Getenv("DATABASE_URL")),

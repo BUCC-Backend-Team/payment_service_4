@@ -14,12 +14,15 @@ func setEnv(t *testing.T, mapping map[string]string) {
 
 func baseEnv() map[string]string {
 	return map[string]string{
-		"DATABASE_URL":                              "postgres://localhost/payments_test",
-		"PAYSTACK_SECRET_KEY":                       "sk_test_abc123",
-		"MERCHANT_API_KEY":                          "mkt_test_key",
-		"CALLBACK_SECRET":                           "cb_secret",
-		"CALLBACK_URL":                              "http://localhost:5000/callbacks",
-		"PAYMENT_TIMEOUT_SECONDS":                   "60",
+		"DATABASE_URL":                           "postgres://localhost/payments_test",
+		"PAYSTACK_SECRET_KEY":                    "sk_test_abc123",
+		"MERCHANT_API_KEY":                       "mkt_test_key",
+		"CALLBACK_SECRET":                        "cb_secret",
+		"CALLBACK_URL":                           "http://localhost:5000/callbacks",
+		"PAYMENT_TIMEOUT_SECONDS":                "60",
+		"TEST_MODE":                              "",
+		"PAYMENT_EXPIRY_WORKER_INTERVAL_SECONDS": "",
+		"CALLBACK_WORKER_INTERVAL_SECONDS":       "",
 	}
 }
 
@@ -54,9 +57,9 @@ func TestLoadFullConfig(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	setEnv(t, baseEnv())
 	setEnv(t, map[string]string{
-		"PORT":                      "",
-		"TEST_MODE":                 "true",
-		"PAYMENT_TIMEOUT_SECONDS":   "",
+		"PORT":                    "",
+		"TEST_MODE":               "true",
+		"PAYMENT_TIMEOUT_SECONDS": "",
 	})
 
 	cfg, err := Load()

@@ -16,9 +16,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	apperrors "github.com/BUCC-Backend-Team/payment_service_4/internal/errors"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/callbacks"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
+	apperrors "github.com/BUCC-Backend-Team/payment_service_4/internal/errors"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/providers"
 )
 

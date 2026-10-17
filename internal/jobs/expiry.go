@@ -16,14 +16,14 @@ import (
 )
 
 type Service struct {
-	store        *database.Store
-	provider     providers.Provider
-	payments     *payments.Service
-	log          *slog.Logger
-	timeout      time.Duration
-	expiryGrace  time.Duration
-	refundGrace  time.Duration
-	batchSize    int32
+	store       *database.Store
+	provider    providers.Provider
+	payments    *payments.Service
+	log         *slog.Logger
+	timeout     time.Duration
+	expiryGrace time.Duration
+	refundGrace time.Duration
+	batchSize   int32
 }
 
 func NewService(store *database.Store, provider providers.Provider, paymentService *payments.Service, log *slog.Logger, timeout time.Duration) *Service {

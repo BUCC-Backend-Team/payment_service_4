@@ -19,8 +19,8 @@ func TestDeduplicationKeyUsesEventAndID(t *testing.T) {
 
 func TestDeduplicationKeyFallsBackToReference(t *testing.T) {
 	event := PaystackEvent{
-		Event:        "charge.success",
-		Data:         EventData{Reference: "pay-ref-1"},
+		Event: "charge.success",
+		Data:  EventData{Reference: "pay-ref-1"},
 	}
 
 	got := DeduplicationKey(event)

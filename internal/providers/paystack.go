@@ -16,11 +16,11 @@ import (
 	"time"
 )
 
-//whether a failed Paystack call can be retried safely.
+// whether a failed Paystack call can be retried safely.
 type Class int
 
 const (
-	ClassReject   Class = iota
+	ClassReject Class = iota
 	ClassRetry
 	ClassAmbiguous
 )

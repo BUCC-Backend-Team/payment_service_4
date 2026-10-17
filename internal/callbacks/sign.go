@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-
 func Sign(secret string, now time.Time, body []byte) string {
 	timestamp := strconv.FormatInt(now.Unix(), 10)
 
