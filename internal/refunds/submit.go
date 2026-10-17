@@ -55,7 +55,11 @@ func (s *Service) submit(ctx context.Context, refundID uuid.UUID, transactionRef
 			PaystackRefundID: sql.NullInt64{Int64: outcome.ID, Valid: true},
 		}); err != nil {
 			s.log.Error("refunds: save paystack refund id", "refundId", refundID, "error", err)
+		} else {
+			s.log.Info("refunds: Paystack accepted refund", "refundId", refundID, "paystackRefundId", outcome.ID, "status", outcome.Status)
 		}
+	} else if !ambiguous {
+		s.log.Warn("refunds: Paystack response had no refund id", "refundId", refundID, "status", outcome.Status)
 	}
 
 	if ambiguous {

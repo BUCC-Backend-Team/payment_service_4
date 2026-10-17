@@ -185,6 +185,7 @@ SELECT
     created_at, updated_at, processed_at
 FROM refunds
 WHERE status = 'pending'
+	AND paystack_refund_id IS NULL
   AND updated_at <= NOW() - make_interval(secs => $1::double precision)
 ORDER BY created_at
 LIMIT $2
