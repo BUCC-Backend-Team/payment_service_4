@@ -14,7 +14,7 @@ import (
 
 	_ "github.com/lib/pq"
 
-	// "github.com/BUCC-Backend-Team/payment_service_4/internal/api"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/api"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/callbacks"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/config"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
@@ -63,7 +63,8 @@ func run() {
 	}
 	defer func() { _ = store.Close() }()
 
-	var queries database.Queries
+	queries := database.NewStore(store)
+
 	paystackProvider := providers.NewPaystack(cfg.PaystackSecretKey, logger)
 	paymentTimeout := time.Duration(cfg.PaymentTimeoutSeconds) * time.Second
 
@@ -79,12 +80,11 @@ func run() {
 	go callbackWorker.Run(workerCtx)
 	go expiryService.Run(workerCtx, cfg.ExpiryWorkerInterval)
 
-	mux := http.NewServeMux()
-	registerRoutes(mux, cfg, paymentService, refundService, webhookService, queries)
+	handler := api.Routes(queries, api.Config{TestMode: cfg.TestMode, MerchantAPIKey: cfg.MerchantAPIKey}, paymentService, refundService, webhookService)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

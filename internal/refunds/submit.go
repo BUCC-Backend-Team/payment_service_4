@@ -2,20 +2,20 @@ package refunds
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/BUCC-Backend-Team/payment_service_4/src/db"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/providers"
 )
-
 
 func (s *Service) submit(ctx context.Context, refundID uuid.UUID, transactionReference string, amount int64) {
 	outcome := providers.Refund{}
 	ambiguous := false
 
-	delay := 1 * time.Second
+	delay := submitBackoffBase
 	for attempt := 1; attempt <= submitAttempts; attempt++ {
 		if attempt > 1 {
 			select {
@@ -50,17 +50,18 @@ func (s *Service) submit(ctx context.Context, refundID uuid.UUID, transactionRef
 	}
 
 	if outcome.ID > 0 {
-		if err := s.store.SetRefundPaystackID(ctx, refundID, outcome.ID); err != nil {
+		if err := s.store.SetRefundPaystackID(ctx, database.SetRefundPaystackIDParams{
+			ID:               refundID,
+			PaystackRefundID: sql.NullInt64{Int64: outcome.ID, Valid: true},
+		}); err != nil {
 			s.log.Error("refunds: save paystack refund id", "refundId", refundID, "error", err)
 		}
 	}
 
 	if ambiguous {
-		s.log.Warn("refunds: outcome uncertain after retries; leaving pending for reconciliation",
-			"refundId", refundID)
+		s.log.Warn("refunds: outcome uncertain after retries; leaving pending for reconciliation", "refundId", refundID)
 	}
 }
-
 
 func (s *Service) failRefund(ctx context.Context, refundID uuid.UUID, cause error) {
 	s.log.Warn("refunds: paystack rejected refund", "refundId", refundID, "error", cause)
@@ -72,7 +73,7 @@ func (s *Service) failRefund(ctx context.Context, refundID uuid.UUID, cause erro
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	txStore := db.NewStore(tx)
+	txStore := s.store.WithTx(tx)
 	if _, err := txStore.GetRefundByIDForUpdate(ctx, refundID); err != nil {
 		s.log.Error("refunds: cannot fail unknown refund", "refundId", refundID, "error", err)
 		return
@@ -87,4 +88,3 @@ func (s *Service) failRefund(ctx context.Context, refundID uuid.UUID, cause erro
 		s.log.Error("refunds: commit fail tx", "refundId", refundID, "error", err)
 	}
 }
-

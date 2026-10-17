@@ -14,10 +14,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
-	"github.com/BUCC-Backend-Team/payment_service_4/internal/callbacks"
-	"github.com/BUCC-Backend-Team/payment_service_4/src/db"
 	apperrors "github.com/BUCC-Backend-Team/payment_service_4/internal/errors"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/callbacks"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/providers"
 )
 
@@ -30,6 +31,7 @@ const (
 
 	defaultTimeoutSeconds = 1800
 	waiterInterval        = 40 * time.Millisecond
+	idempotencyWaitLimit  = 10 * time.Second
 )
 
 type CreateRequest struct {
@@ -61,13 +63,13 @@ type Payment struct {
 }
 
 type Service struct {
-	store    *db.Store
+	store    *database.Store
 	provider providers.Provider
 	log      *slog.Logger
 	timeout  time.Duration
 }
 
-func NewService(store *db.Store, provider providers.Provider, log *slog.Logger, paymentTimeout time.Duration) *Service {
+func NewService(store *database.Store, provider providers.Provider, log *slog.Logger, paymentTimeout time.Duration) *Service {
 	if paymentTimeout <= 0 {
 		paymentTimeout = defaultTimeoutSeconds * time.Second
 	}
@@ -79,13 +81,17 @@ func NewService(store *db.Store, provider providers.Provider, log *slog.Logger, 
 	}
 }
 
+func PaymentScope(idempotencyKey string) string {
+	return "payment:" + idempotencyKey
+}
+
 func (s *Service) Create(ctx context.Context, req CreateRequest, idemKey string) (CreateResult, bool, error) {
 	rec, ok, err := s.consumeIdempotency(ctx, req, idemKey)
 	if err != nil {
 		return CreateResult{}, false, err
 	}
 	if ok {
-		return rec, true, nil
+		return rec.Value, rec.Replayed, nil
 	}
 
 	created, err := s.createPayment(ctx, req, idemKey)
@@ -95,97 +101,101 @@ func (s *Service) Create(ctx context.Context, req CreateRequest, idemKey string)
 	return created, false, nil
 }
 
+type idempotencyReplay struct {
+	Value    CreateResult
+	Replayed bool
+}
 
-func (s *Service) consumeIdempotency(ctx context.Context, req CreateRequest, idemKey string) (CreateResult, bool, error) {
+func (s *Service) consumeIdempotency(ctx context.Context, req CreateRequest, idemKey string) (idempotencyReplay, bool, error) {
 	bodyHash := requestHash(req.OrderID, strconv.FormatInt(req.Amount, 10), req.Currency, req.CustomerEmail, req.ReturnURL)
-	key := db.PaymentScope + idemKey
+	key := PaymentScope(idemKey)
 
+	var zero idempotencyReplay
 	record, err := s.store.GetIdempotencyRecord(ctx, key)
 	if err == nil {
 		if record.RequestHash != bodyHash {
-			return CreateResult{}, false, apperrors.New(http.StatusUnprocessableEntity, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
+			return zero, false, apperrors.New(http.StatusUnprocessableEntity, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
 		}
 		if record.ResponseBody != "" {
 			var saved CreateResult
 			if err := json.Unmarshal([]byte(record.ResponseBody), &saved); err != nil {
-				return CreateResult{}, false, fmt.Errorf("payments: decode stored response: %w", err)
+				return zero, false, fmt.Errorf("payments: decode stored response: %w", err)
 			}
-			return saved, true, nil
+			return idempotencyReplay{Value: saved, Replayed: true}, true, nil
 		}
-	} else if !errors.Is(err, db.ErrNotFound) {
-		return CreateResult{}, false, fmt.Errorf("payments: read idempotency record: %w", err)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return zero, false, fmt.Errorf("payments: read idempotency record: %w", err)
 	}
 
-	reserved, err := s.store.ReserveIdempotencyKey(ctx, key, bodyHash)
+	rows, err := s.store.ReserveIdempotencyKey(ctx, database.ReserveIdempotencyKeyParams{
+		Key:         key,
+		RequestHash: bodyHash,
+	})
 	if err != nil {
-		return CreateResult{}, false, fmt.Errorf("payments: reserve idempotency key: %w", err)
+		return zero, false, fmt.Errorf("payments: reserve idempotency key: %w", err)
 	}
-	if reserved {
-		return CreateResult{}, false, nil
+	if rows > 0 {
+		return zero, false, nil
 	}
 
-	winner, found, err := s.waitForKey(ctx, key, s.callWait())
+	winner, found, err := s.waitForKey(ctx, key, bodyHash, idempotencyWaitLimit)
 	if err != nil {
-		return CreateResult{}, false, err
+		return zero, false, err
 	}
 	if found {
-		if winner.RequestHash != bodyHash {
-			return CreateResult{}, false, apperrors.New(http.StatusUnprocessableEntity, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
-		}
 		var saved CreateResult
 		if err := json.Unmarshal([]byte(winner.ResponseBody), &saved); err != nil {
-			return CreateResult{}, false, fmt.Errorf("payments: decode stored response: %w", err)
+			return zero, false, fmt.Errorf("payments: decode stored response: %w", err)
 		}
-		return saved, true, nil
+		return idempotencyReplay{Value: saved, Replayed: true}, true, nil
 	}
 
-	return CreateResult{}, false, apperrors.New(http.StatusConflict, "idempotency_in_progress", "A request with this Idempotency-Key is still in flight")
+	return zero, false, apperrors.New(http.StatusConflict, "idempotency_in_progress", "A request with this Idempotency-Key is still in flight")
 }
 
-func (s *Service) callWait() time.Duration {
-	return 10 * time.Second
-}
-
-func (s *Service) waitForKey(ctx context.Context, key string, timeout time.Duration) (db.IdempotencyRecord, bool, error) {
+func (s *Service) waitForKey(ctx context.Context, key, bodyHash string, timeout time.Duration) (database.GetIdempotencyRecordRow, bool, error) {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return db.IdempotencyRecord{}, false, ctx.Err()
+			return database.GetIdempotencyRecordRow{}, false, ctx.Err()
 		case <-time.After(waiterInterval):
 		}
 
 		record, err := s.store.GetIdempotencyRecord(ctx, key)
-		if err == nil && record.ResponseBody != "" {
-			return record, true, nil
-		}
-		if err != nil && !errors.Is(err, db.ErrNotFound) {
-			return db.IdempotencyRecord{}, false, fmt.Errorf("payments: poll idempotency record: %w", err)
+		if err == nil {
+			if record.RequestHash != bodyHash {
+				return record, false, apperrors.New(http.StatusUnprocessableEntity, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
+			}
+			if record.ResponseBody != "" {
+				return record, true, nil
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return database.GetIdempotencyRecordRow{}, false, fmt.Errorf("payments: poll idempotency record: %w", err)
 		}
 	}
 
-	return db.IdempotencyRecord{}, false, nil
+	return database.GetIdempotencyRecordRow{}, false, nil
 }
-
 
 func (s *Service) createPayment(ctx context.Context, req CreateRequest, idemKey string) (CreateResult, error) {
 	paymentID := uuid.New()
 
-	created, err := s.store.CreatePayment(ctx, db.Payment{
+	created, err := s.store.CreatePayment(ctx, database.CreatePaymentParams{
 		ID:            paymentID,
 		OrderID:       req.OrderID,
 		Amount:        req.Amount,
 		Currency:      req.Currency,
 		CustomerEmail: req.CustomerEmail,
-		ReturnURL:     req.ReturnURL,
+		ReturnUrl:     req.ReturnURL,
 		Status:        StatusPending,
-		Reference:     paymentID.String(),
+		Reference:     paymentID,
 		ExpiresAt:     sql.NullTime{Time: time.Now().UTC().Add(s.timeout), Valid: true},
 	})
 	if err != nil {
-		if errors.Is(err, db.ErrUnique) {
-			_ = s.store.DeleteIdempotencyKey(ctx, db.PaymentScope+idemKey)
+		if isUniqueViolation(err) {
+			_ = s.store.DeleteIdempotencyKey(ctx, PaymentScope(idemKey))
 			return CreateResult{}, apperrors.New(http.StatusConflict, "payment_exists", "A payment already exists for this order")
 		}
 		return CreateResult{}, fmt.Errorf("payments: create payment: %w", err)
@@ -194,19 +204,22 @@ func (s *Service) createPayment(ctx context.Context, req CreateRequest, idemKey 
 	return s.initialize(ctx, created, idemKey)
 }
 
-func (s *Service) initialize(ctx context.Context, payment db.Payment, idemKey string) (CreateResult, error) {
+func (s *Service) initialize(ctx context.Context, payment database.Payment, idemKey string) (CreateResult, error) {
 	checkout, err := s.provider.InitializeTransaction(ctx, providers.InitializeRequest{
-		Reference:   payment.Reference,
+		Reference:   payment.Reference.String(),
 		Amount:      payment.Amount,
 		Currency:    payment.Currency,
 		Email:       payment.CustomerEmail,
-		CallbackURL: payment.ReturnURL,
+		CallbackURL: payment.ReturnUrl,
 	})
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("payments: initialize transaction: %w", err)
 	}
 
-	if err := s.store.UpdatePaymentCheckout(ctx, payment.ID, checkout.AuthorizationURL); err != nil {
+	if err := s.store.UpdatePaymentCheckout(ctx, database.UpdatePaymentCheckoutParams{
+		ID:          payment.ID,
+		CheckoutUrl: sql.NullString{String: checkout.AuthorizationURL, Valid: true},
+	}); err != nil {
 		return CreateResult{}, fmt.Errorf("payments: save checkout url: %w", err)
 	}
 
@@ -223,7 +236,11 @@ func (s *Service) initialize(ctx context.Context, payment db.Payment, idemKey st
 	if err != nil {
 		return CreateResult{}, fmt.Errorf("payments: encode response: %w", err)
 	}
-	if err := s.store.StoreIdempotencyResponse(ctx, db.PaymentScope+idemKey, http.StatusCreated, string(raw)); err != nil {
+	if err := s.store.StoreIdempotencyResponse(ctx, database.StoreIdempotencyResponseParams{
+		Key:            PaymentScope(idemKey),
+		ResponseBody:   string(raw),
+		ResponseStatus: sql.NullInt32{Int32: http.StatusCreated, Valid: true},
+	}); err != nil {
 		return CreateResult{}, fmt.Errorf("payments: store idempotency response: %w", err)
 	}
 
@@ -233,13 +250,13 @@ func (s *Service) initialize(ctx context.Context, payment db.Payment, idemKey st
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Payment, error) {
 	row, err := s.store.GetPaymentByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return Payment{}, apperrors.New(http.StatusNotFound, "payment_not_found", "Payment not found")
 		}
 		return Payment{}, fmt.Errorf("payments: get payment: %w", err)
 	}
 
-	refunded, err := s.store.SumProcessedRefunds(ctx, id)
+	refunded, err := s.store.SumProcessedRefunds(ctx, row.ID)
 	if err != nil {
 		return Payment{}, fmt.Errorf("payments: sum processed refunds: %w", err)
 	}
@@ -256,13 +273,16 @@ func (s *Service) Get(ctx context.Context, id uuid.UUID) (Payment, error) {
 	}, nil
 }
 
-
-func (s *Service) MarkSucceeded(ctx context.Context, txStore *db.Store, payment db.Payment, channel string, late bool) error {
+func (s *Service) MarkSucceeded(ctx context.Context, txStore *database.Queries, payment database.Payment, channel string, late bool) error {
 	if payment.Status == StatusSucceeded || payment.Status == StatusPartiallyRefunded || payment.Status == StatusRefunded {
 		return nil
 	}
 
-	if err := txStore.MarkPaymentSucceeded(ctx, payment.ID, channel, late); err != nil {
+	if err := txStore.MarkPaymentSucceeded(ctx, database.MarkPaymentSucceededParams{
+		ID:      payment.ID,
+		Late:    late,
+		Channel: sql.NullString{String: channel, Valid: channel != ""},
+	}); err != nil {
 		return fmt.Errorf("payments: mark succeeded: %w", err)
 	}
 
@@ -277,8 +297,7 @@ func (s *Service) MarkSucceeded(ctx context.Context, txStore *db.Store, payment 
 	})
 }
 
-
-func (s *Service) MarkExpired(ctx context.Context, txStore *db.Store, payment db.Payment) error {
+func (s *Service) MarkExpired(ctx context.Context, txStore *database.Queries, payment database.Payment) error {
 	if payment.Status != StatusPending {
 		return nil
 	}
@@ -298,9 +317,11 @@ func (s *Service) MarkExpired(ctx context.Context, txStore *db.Store, payment db
 	})
 }
 
-
-func (s *Service) ApplyRefundProcessed(ctx context.Context, txStore *db.Store, refund db.Refund) error {
-	if err := txStore.MarkRefundProcessed(ctx, refund.ID, refund.PaystackRefundID.Int64); err != nil {
+func (s *Service) ApplyRefundProcessed(ctx context.Context, txStore *database.Queries, refund database.Refund) error {
+	if err := txStore.MarkRefundProcessed(ctx, database.MarkRefundProcessedParams{
+		ID:      refund.ID,
+		Column2: refund.PaystackRefundID.Int64,
+	}); err != nil {
 		return fmt.Errorf("payments: mark refund processed: %w", err)
 	}
 
@@ -314,7 +335,10 @@ func (s *Service) ApplyRefundProcessed(ctx context.Context, txStore *db.Store, r
 		return fmt.Errorf("payments: sum processed refunds: %w", err)
 	}
 
-	if err := txStore.SetPaymentRefundState(ctx, payment.ID, total); err != nil {
+	if err := txStore.SetPaymentRefundState(ctx, database.SetPaymentRefundStateParams{
+		ID:     payment.ID,
+		Amount: total,
+	}); err != nil {
 		return fmt.Errorf("payments: set refund state: %w", err)
 	}
 
@@ -333,20 +357,8 @@ func (s *Service) ApplyRefundProcessed(ctx context.Context, txStore *db.Store, r
 		Late:           payment.Late,
 	})
 }
-func requestHash(parts ...string) string {
-	joined := make([]byte, 0, 128)
-	for i, part := range parts {
-		if i > 0 {
-			joined = append(joined, 0x1f)
-		}
-		joined = append(joined, part...)
-	}
-	sum := sha256.Sum256(joined)
-	return hex.EncodeToString(sum[:])
-}
 
-
-func (s *Service) ApplyRefundFailed(ctx context.Context, txStore *db.Store, refundID uuid.UUID) error {
+func (s *Service) ApplyRefundFailed(ctx context.Context, txStore *database.Queries, refundID uuid.UUID) error {
 	refund, err := txStore.GetRefundByIDForUpdate(ctx, refundID)
 	if err != nil {
 		return fmt.Errorf("payments: lock refund for failure: %w", err)
@@ -376,3 +388,22 @@ func (s *Service) ApplyRefundFailed(ctx context.Context, txStore *db.Store, refu
 		Late:           payment.Late,
 	})
 }
+
+func requestHash(parts ...string) string {
+	joined := make([]byte, 0, 128)
+	for i, part := range parts {
+		if i > 0 {
+			joined = append(joined, 0x1f)
+		}
+		joined = append(joined, part...)
+	}
+	sum := sha256.Sum256(joined)
+	return hex.EncodeToString(sum[:])
+}
+
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == pqUniqueViolation
+}
+
+const pqUniqueViolation = "23505"

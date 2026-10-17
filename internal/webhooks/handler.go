@@ -13,7 +13,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/BUCC-Backend-Team/payment_service_4/src/db"
+	"github.com/google/uuid"
+
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/payments"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/providers"
 )
@@ -21,14 +23,14 @@ import (
 const maxWebhookBody = 1 << 20
 
 type Service struct {
-	store     *db.Store
+	store     *database.Store
 	provider  providers.Provider
 	payments  *payments.Service
 	log       *slog.Logger
 	secretKey string
 }
 
-func NewService(store *db.Store, provider providers.Provider, paymentService *payments.Service, log *slog.Logger, secretKey string) *Service {
+func NewService(store *database.Store, provider providers.Provider, paymentService *payments.Service, log *slog.Logger, secretKey string) *Service {
 	return &Service{
 		store:     store,
 		provider:  provider,
@@ -37,7 +39,6 @@ func NewService(store *db.Store, provider providers.Provider, paymentService *pa
 		secretKey: secretKey,
 	}
 }
-
 
 func (s *Service) Handle(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody))
@@ -85,7 +86,6 @@ func validSignature(secret string, body []byte, signature string) bool {
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) == 1
 }
 
-
 func (s *Service) handleChargeSuccess(ctx context.Context, w http.ResponseWriter, event PaystackEvent) {
 	reference := event.Data.Reference
 	if reference == "" {
@@ -93,10 +93,17 @@ func (s *Service) handleChargeSuccess(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	payment, err := s.store.GetPaymentByReference(ctx, reference)
+	paymentID, err := uuid.Parse(reference)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			s.log.Warn("webhooks: charge.success unknown reference", "reference", reference)
+		s.log.Warn("webhooks: charge.success unknown reference", "reference", reference)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	payment, err := s.store.GetPaymentByReference(ctx, paymentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.log.Warn("webhooks: charge.success unknown payment", "reference", reference)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -125,16 +132,16 @@ func (s *Service) handleChargeSuccess(ctx context.Context, w http.ResponseWriter
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	txStore := db.NewStore(tx)
+	txStore := s.store.WithTx(tx)
 
 	dedup := DeduplicationKey(event)
-	delivered, err := txStore.RecordProcessedEvent(ctx, dedup)
+	rows, err := txStore.RecordProcessedEvent(ctx, dedup)
 	if err != nil {
 		s.log.Error("webhooks: record dedup key", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if !delivered {
+	if rows == 0 {
 		s.log.Warn("webhooks: duplicate charge.success ignored", "reference", reference)
 		w.WriteHeader(http.StatusOK)
 		return
@@ -153,7 +160,6 @@ func (s *Service) handleChargeSuccess(ctx context.Context, w http.ResponseWriter
 	w.WriteHeader(http.StatusOK)
 }
 
-
 func (s *Service) handleRefundEvent(ctx context.Context, w http.ResponseWriter, event PaystackEvent, processed bool) {
 	reference := event.Data.TransactionReferenceOf()
 	if reference == "" {
@@ -161,10 +167,17 @@ func (s *Service) handleRefundEvent(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 
-	payment, err := s.store.GetPaymentByReference(ctx, reference)
+	paymentID, err := uuid.Parse(reference)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			s.log.Warn("webhooks: refund event unknown reference", "reference", reference)
+		s.log.Warn("webhooks: refund event unknown reference", "reference", reference)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	payment, err := s.store.GetPaymentByReference(ctx, paymentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.log.Warn("webhooks: refund event unknown payment", "reference", reference)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -181,16 +194,16 @@ func (s *Service) handleRefundEvent(ctx context.Context, w http.ResponseWriter, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	txStore := db.NewStore(tx)
+	txStore := s.store.WithTx(tx)
 
 	dedup := DeduplicationKey(event)
-	delivered, err := txStore.RecordProcessedEvent(ctx, dedup)
+	rows, err := txStore.RecordProcessedEvent(ctx, dedup)
 	if err != nil {
 		s.log.Error("webhooks: record dedup key", "error", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if !delivered {
+	if rows == 0 {
 		s.log.Warn("webhooks: duplicate refund event ignored", "reference", reference)
 		w.WriteHeader(http.StatusOK)
 		return
@@ -210,11 +223,12 @@ func (s *Service) handleRefundEvent(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 
+	if event.Data.ID > 0 {
+		refund.PaystackRefundID = sql.NullInt64{Int64: event.Data.ID, Valid: true}
+	}
+
 	var applyErr error
 	if processed {
-		if event.Data.ID > 0 {
-			refund.PaystackRefundID = toNullInt64(event.Data.ID)
-		}
 		applyErr = s.payments.ApplyRefundProcessed(ctx, txStore, refund)
 	} else {
 		applyErr = s.payments.ApplyRefundFailed(ctx, txStore, refund.ID)
@@ -232,8 +246,7 @@ func (s *Service) handleRefundEvent(ctx context.Context, w http.ResponseWriter, 
 	w.WriteHeader(http.StatusOK)
 }
 
-
-func matchRefund(active []db.Refund, data EventData) (db.Refund, bool) {
+func matchRefund(active []database.Refund, data EventData) (database.Refund, bool) {
 	if data.ID > 0 {
 		for _, refund := range active {
 			if refund.PaystackRefundID.Valid && refund.PaystackRefundID.Int64 == data.ID {
@@ -251,18 +264,11 @@ func matchRefund(active []db.Refund, data EventData) (db.Refund, bool) {
 			return refund, true
 		}
 	}
-	return db.Refund{}, false
+	return database.Refund{}, false
 }
 
-func matchesPayment(transaction providers.Transaction, payment db.Payment) bool {
+func matchesPayment(transaction providers.Transaction, payment database.Payment) bool {
 	return transaction.Status == "success" &&
 		transaction.Amount == payment.Amount &&
 		transaction.Currency == payment.Currency
-}
-
-func toNullInt64(v int64) sql.NullInt64 {
-	if v <= 0 {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: v, Valid: true}
 }
