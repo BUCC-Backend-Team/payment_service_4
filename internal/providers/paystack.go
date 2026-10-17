@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -67,10 +68,17 @@ type PaystackProvider struct {
 	Logger    *slog.Logger
 }
 
+const defaultPaystackBaseURL = "https://api.paystack.co"
+
 func NewPaystack(secretKey string, logger *slog.Logger) *PaystackProvider {
+	baseURL := strings.TrimSpace(os.Getenv("PAYSTACK_BASE_URL"))
+	if baseURL == "" {
+		baseURL = defaultPaystackBaseURL
+	}
+
 	return &PaystackProvider{
 		SecretKey: secretKey,
-		BaseURL:   "https://api.paystack.co",
+		BaseURL:   baseURL,
 		HTTP: &http.Client{
 			Timeout: 30 * time.Second,
 		},

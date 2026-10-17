@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,23 +10,23 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/BUCC-Backend-Team/payment_service_4/src/db"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/payments"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/providers"
 )
 
 type Service struct {
-	store        *db.Store
+	store        *database.Store
 	provider     providers.Provider
 	payments     *payments.Service
 	log          *slog.Logger
 	timeout      time.Duration
 	expiryGrace  time.Duration
 	refundGrace  time.Duration
-	batchSize    int
+	batchSize    int32
 }
 
-func NewService(store *db.Store, provider providers.Provider, paymentService *payments.Service, log *slog.Logger, timeout time.Duration) *Service {
+func NewService(store *database.Store, provider providers.Provider, paymentService *payments.Service, log *slog.Logger, timeout time.Duration) *Service {
 	return &Service{
 		store:       store,
 		provider:    provider,
@@ -68,6 +69,9 @@ func (s *Service) runOnce(ctx context.Context) {
 	}
 }
 
+func (s *Service) ReconcileOnce(ctx context.Context) {
+	s.runOnce(ctx)
+}
 
 func (s *Service) reconcilePayments(ctx context.Context) error {
 	rows, err := s.store.ListPendingPayments(ctx, s.batchSize)
@@ -80,14 +84,14 @@ func (s *Service) reconcilePayments(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		transaction, err := s.provider.VerifyTransaction(ctx, payment.Reference)
+		transaction, err := s.provider.VerifyTransaction(ctx, payment.Reference.String())
 		if err != nil {
 			s.log.Warn("jobs: verify payment failed", "reference", payment.Reference, "error", err)
 			continue
 		}
 
 		if transaction.Status == "success" && transaction.Amount == payment.Amount && transaction.Currency == payment.Currency {
-			if err := s.markSucceeded(ctx, payment.Reference, transaction.Channel, false); err != nil {
+			if err := s.markSucceeded(ctx, payment.Reference.String(), transaction.Channel, false); err != nil {
 				s.log.Error("jobs: reconcile succeeded failed", "reference", payment.Reference, "error", err)
 			}
 			continue
@@ -103,7 +107,6 @@ func (s *Service) reconcilePayments(ctx context.Context) error {
 	return nil
 }
 
-
 func (s *Service) markSucceeded(ctx context.Context, reference, channel string, late bool) error {
 	tx, err := s.store.BeginTx(ctx, nil)
 	if err != nil {
@@ -111,11 +114,16 @@ func (s *Service) markSucceeded(ctx context.Context, reference, channel string, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	txStore := db.NewStore(tx)
+	txStore := s.store.WithTx(tx)
 
-	payment, err := txStore.GetPaymentByReferenceForUpdate(ctx, reference)
+	refID, err := uuid.Parse(reference)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+		return fmt.Errorf("jobs: parse reference: %w", err)
+	}
+
+	payment, err := txStore.GetPaymentByReferenceForUpdate(ctx, refID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return fmt.Errorf("jobs: lock payment by reference: %w", err)
@@ -135,11 +143,11 @@ func (s *Service) markExpired(ctx context.Context, id uuid.UUID) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	txStore := db.NewStore(tx)
+	txStore := s.store.WithTx(tx)
 
 	payment, err := txStore.GetPaymentByIDForUpdate(ctx, id)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return fmt.Errorf("jobs: lock payment by id: %w", err)
@@ -152,9 +160,11 @@ func (s *Service) markExpired(ctx context.Context, id uuid.UUID) error {
 	return tx.Commit()
 }
 
-
 func (s *Service) reconcileRefunds(ctx context.Context) error {
-	stuck, err := s.store.ListStuckPendingRefunds(ctx, s.refundGrace, s.batchSize)
+	stuck, err := s.store.ListStuckPendingRefunds(ctx, database.ListStuckPendingRefundsParams{
+		Column1: s.refundGrace.Seconds(),
+		Limit:   s.batchSize,
+	})
 	if err != nil {
 		return fmt.Errorf("jobs: list stuck pending refunds: %w", err)
 	}
@@ -171,21 +181,21 @@ func (s *Service) reconcileRefunds(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) reconcileOneRefund(ctx context.Context, refund db.Refund) error {
+func (s *Service) reconcileOneRefund(ctx context.Context, refund database.Refund) error {
 	tx, err := s.store.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("jobs: begin stuck refund tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	txStore := db.NewStore(tx)
+	txStore := s.store.WithTx(tx)
 	locked, err := txStore.GetPaymentByIDForUpdate(ctx, refund.PaymentID)
 	if err != nil {
 		return fmt.Errorf("jobs: lock payment for refund reconcile: %w", err)
 	}
 
 	refundResult, err := s.provider.CreateRefund(ctx, providers.RefundRequest{
-		Transaction: locked.Reference,
+		Transaction: locked.Reference.String(),
 		Amount:      refund.Amount,
 	})
 	if err != nil {
@@ -200,7 +210,10 @@ func (s *Service) reconcileOneRefund(ctx context.Context, refund db.Refund) erro
 	}
 
 	if refundResult.ID > 0 {
-		if err := txStore.SetRefundPaystackID(ctx, refund.ID, refundResult.ID); err != nil {
+		if err := txStore.SetRefundPaystackID(ctx, database.SetRefundPaystackIDParams{
+			ID:               refund.ID,
+			PaystackRefundID: sql.NullInt64{Int64: refundResult.ID, Valid: true},
+		}); err != nil {
 			return fmt.Errorf("jobs: save paystack refund id: %w", err)
 		}
 	}

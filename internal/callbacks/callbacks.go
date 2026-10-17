@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/BUCC-Backend-Team/payment_service_4/src/db"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
 )
 
 const (
@@ -29,9 +29,9 @@ type EventData struct {
 }
 
 type Event struct {
-	Type string     `json:"type"`
-	Data EventData  `json:"data"`
-	ID   *uuid.UUID `json:"-"`
+	Type string    `json:"type"`
+	Data EventData `json:"data"`
+	ID   uuid.UUID `json:"-"`
 }
 
 type envelope struct {
@@ -41,8 +41,7 @@ type envelope struct {
 	Data      EventData `json:"data"`
 }
 
-
-func Enqueue(ctx context.Context, store *db.Store, eventType string, data EventData) error {
+func Enqueue(ctx context.Context, store *database.Queries, eventType string, data EventData) error {
 	id := uuid.New()
 
 	payload, err := json.Marshal(envelope{
@@ -55,5 +54,9 @@ func Enqueue(ctx context.Context, store *db.Store, eventType string, data EventD
 		return fmt.Errorf("callbacks: encode callback payload: %w", err)
 	}
 
-	return store.EnqueueCallback(ctx, id, eventType, payload)
+	return store.EnqueueCallback(ctx, database.EnqueueCallbackParams{
+		ID:        id,
+		EventType: eventType,
+		Payload:   payload,
+	})
 }

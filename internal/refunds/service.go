@@ -3,18 +3,20 @@ package refunds
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 
 	apperrors "github.com/BUCC-Backend-Team/payment_service_4/internal/errors"
-	"github.com/BUCC-Backend-Team/payment_service_4/src/db"
+	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/payments"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/providers"
 )
@@ -24,8 +26,10 @@ const (
 	StatusProcessed = "processed"
 	StatusFailed    = "failed"
 
-	refundCallWait = 10 * time.Second
-	submitAttempts = 6
+	refundCallWait    = 10 * time.Second
+	refundPollEvery   = 40 * time.Millisecond
+	submitAttempts    = 6
+	submitBackoffBase = 1 * time.Second
 )
 
 type Result struct {
@@ -35,13 +39,13 @@ type Result struct {
 }
 
 type Service struct {
-	store    *db.Store
+	store    *database.Store
 	provider providers.Provider
 	payments *payments.Service
 	log      *slog.Logger
 }
 
-func NewService(store *db.Store, provider providers.Provider, paymentService *payments.Service, log *slog.Logger) *Service {
+func NewService(store *database.Store, provider providers.Provider, paymentService *payments.Service, log *slog.Logger) *Service {
 	return &Service{
 		store:    store,
 		provider: provider,
@@ -50,22 +54,25 @@ func NewService(store *db.Store, provider providers.Provider, paymentService *pa
 	}
 }
 
+func RefundScope(idempotencyKey string) string {
+	return "refund:" + idempotencyKey
+}
 
 func (s *Service) Create(ctx context.Context, paymentID uuid.UUID, idemKey string, amount int64) (Result, bool, error) {
 	if idemKey == "" {
-		return Result{}, false, apperrors.New(400, "missing_idempotency_key", "Idempotency-Key header is required")
+		return Result{}, false, apperrors.New(http.StatusBadRequest, "missing_idempotency_key", "Idempotency-Key header is required")
 	}
 	if amount < 0 {
-		return Result{}, false, apperrors.New(400, "invalid_amount", "amount must be a positive integer of kobo")
+		return Result{}, false, apperrors.New(http.StatusBadRequest, "invalid_amount", "amount must be a positive integer of kobo")
 	}
 
 	bodyHash := requestHash(strconv.FormatInt(amount, 10))
-	key := db.RefundScope + idemKey
+	key := RefundScope(idemKey)
 
 	rec, err := s.store.GetIdempotencyRecord(ctx, key)
 	if err == nil {
 		if rec.RequestHash != bodyHash {
-			return Result{}, false, apperrors.New(422, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
+			return Result{}, false, apperrors.New(http.StatusUnprocessableEntity, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
 		}
 		if rec.ResponseBody != "" {
 			var saved Result
@@ -74,21 +81,24 @@ func (s *Service) Create(ctx context.Context, paymentID uuid.UUID, idemKey strin
 			}
 			return saved, true, nil
 		}
-	} else if !errors.Is(err, db.ErrNotFound) {
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return Result{}, false, fmt.Errorf("refunds: read idempotency record: %w", err)
 	}
 
-	reserved, err := s.store.ReserveIdempotencyKey(ctx, key, bodyHash)
+	rows, err := s.store.ReserveIdempotencyKey(ctx, database.ReserveIdempotencyKeyParams{
+		Key:         key,
+		RequestHash: bodyHash,
+	})
 	if err != nil {
 		return Result{}, false, fmt.Errorf("refunds: reserve idempotency key: %w", err)
 	}
-	if !reserved {
+	if rows == 0 {
 		return s.waitForWinner(ctx, key, bodyHash)
 	}
 
-	result, err := s.insertRefund(ctx, paymentID, idemKey, amount, key)
+	result, err := s.insertRefund(ctx, paymentID, key, amount)
 	if err != nil {
-		if appErr, ok := err.(*apperrors.AppError); ok && appErr.HTTPStatus() != 500 {
+		if appErr, ok := err.(*apperrors.AppError); ok && appErr.HTTPStatus() != http.StatusInternalServerError && appErr.HTTPStatus() != http.StatusNotFound {
 			_ = s.store.DeleteIdempotencyKey(ctx, key)
 		}
 		return Result{}, false, err
@@ -96,25 +106,25 @@ func (s *Service) Create(ctx context.Context, paymentID uuid.UUID, idemKey strin
 	return result, false, nil
 }
 
-func (s *Service) insertRefund(ctx context.Context, paymentID uuid.UUID, idemKey string, requested int64, key string) (Result, error) {
+func (s *Service) insertRefund(ctx context.Context, paymentID uuid.UUID, key string, requested int64) (Result, error) {
 	tx, err := s.store.BeginTx(ctx, nil)
 	if err != nil {
 		return Result{}, fmt.Errorf("refunds: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	txStore := db.NewStore(tx)
+	txStore := s.store.WithTx(tx)
 
 	payment, err := txStore.GetPaymentByIDForUpdate(ctx, paymentID)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return Result{}, apperrors.New(404, "payment_not_found", "Payment not found")
+		if errors.Is(err, sql.ErrNoRows) {
+			return Result{}, apperrors.New(http.StatusNotFound, "payment_not_found", "Payment not found")
 		}
 		return Result{}, fmt.Errorf("refunds: lock payment: %w", err)
 	}
 
 	if payment.Status != payments.StatusSucceeded && payment.Status != payments.StatusPartiallyRefunded {
-		return Result{}, apperrors.New(409, "not_refundable", "Payment is not in a refundable state")
+		return Result{}, apperrors.New(http.StatusConflict, "not_refundable", "Payment is not in a refundable state")
 	}
 
 	activeTotal, err := txStore.SumActiveRefunds(ctx, payment.ID)
@@ -124,7 +134,7 @@ func (s *Service) insertRefund(ctx context.Context, paymentID uuid.UUID, idemKey
 
 	remaining := payment.Amount - activeTotal
 	if remaining <= 0 {
-		return Result{}, apperrors.New(409, "not_refundable", "There is nothing left to refund")
+		return Result{}, apperrors.New(http.StatusConflict, "not_refundable", "There is nothing left to refund")
 	}
 
 	amount := requested
@@ -132,11 +142,11 @@ func (s *Service) insertRefund(ctx context.Context, paymentID uuid.UUID, idemKey
 		amount = remaining
 	}
 	if amount > remaining {
-		return Result{}, apperrors.New(409, "not_refundable", "Requested refund exceeds the remaining balance")
+		return Result{}, apperrors.New(http.StatusConflict, "not_refundable", "Requested refund exceeds the remaining balance")
 	}
 
 	refundID := uuid.New()
-	if _, err := txStore.CreateRefund(ctx, db.Refund{
+	if _, err := txStore.CreateRefund(ctx, database.CreateRefundParams{
 		ID:        refundID,
 		PaymentID: payment.ID,
 		Amount:    amount,
@@ -155,7 +165,11 @@ func (s *Service) insertRefund(ctx context.Context, paymentID uuid.UUID, idemKey
 	if err != nil {
 		return Result{}, fmt.Errorf("refunds: encode response: %w", err)
 	}
-	if err := txStore.StoreIdempotencyResponse(ctx, key, 202, string(raw)); err != nil {
+	if err := txStore.StoreIdempotencyResponse(ctx, database.StoreIdempotencyResponseParams{
+		Key:            key,
+		ResponseBody:   string(raw),
+		ResponseStatus: sql.NullInt32{Int32: http.StatusAccepted, Valid: true},
+	}); err != nil {
 		return Result{}, fmt.Errorf("refunds: store idempotency response: %w", err)
 	}
 
@@ -163,7 +177,7 @@ func (s *Service) insertRefund(ctx context.Context, paymentID uuid.UUID, idemKey
 		return Result{}, fmt.Errorf("refunds: commit: %w", err)
 	}
 
-	go s.submit(context.WithoutCancel(ctx), refundID, payment.Reference, amount)
+	go s.submit(context.WithoutCancel(ctx), refundID, payment.Reference.String(), amount)
 
 	return result, nil
 }
@@ -174,13 +188,13 @@ func (s *Service) waitForWinner(ctx context.Context, key, bodyHash string) (Resu
 		select {
 		case <-ctx.Done():
 			return Result{}, false, ctx.Err()
-		case <-time.After(40 * time.Millisecond):
+		case <-time.After(refundPollEvery):
 		}
 
 		rec, err := s.store.GetIdempotencyRecord(ctx, key)
 		if err == nil {
 			if rec.RequestHash != bodyHash {
-				return Result{}, false, apperrors.New(422, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
+				return Result{}, false, apperrors.New(http.StatusUnprocessableEntity, "key_reuse_mismatch", "Idempotency-Key reused with a different body")
 			}
 			if rec.ResponseBody != "" {
 				var saved Result
@@ -189,15 +203,14 @@ func (s *Service) waitForWinner(ctx context.Context, key, bodyHash string) (Resu
 				}
 				return saved, true, nil
 			}
-		} else if !errors.Is(err, db.ErrNotFound) {
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			return Result{}, false, fmt.Errorf("refunds: poll idempotency record: %w", err)
 		}
 	}
-	return Result{}, false, apperrors.New(409, "idempotency_in_progress", "A request with this Idempotency-Key is still in flight")
+	return Result{}, false, apperrors.New(http.StatusConflict, "idempotency_in_progress", "A request with this Idempotency-Key is still in flight")
 }
 
 func requestHash(amount string) string {
 	sum := sha256.Sum256([]byte("refund|" + amount))
 	return hex.EncodeToString(sum[:])
 }
-
