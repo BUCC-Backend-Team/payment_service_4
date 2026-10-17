@@ -86,6 +86,12 @@ func (s *Service) reconcilePayments(ctx context.Context) error {
 
 		transaction, err := s.provider.VerifyTransaction(ctx, payment.Reference.String())
 		if err != nil {
+			if providers.IsTransactionNotFound(err) {
+				if err := s.markExpired(ctx, payment.ID); err != nil {
+					s.log.Error("jobs: expire missing payment failed", "reference", payment.Reference, "error", err)
+				}
+				continue
+			}
 			s.log.Warn("jobs: verify payment failed", "reference", payment.Reference, "error", err)
 			continue
 		}

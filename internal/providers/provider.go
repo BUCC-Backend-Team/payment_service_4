@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 type Checkout struct {
@@ -46,6 +47,14 @@ func IsAmbiguous(err error) bool {
 		return true
 	}
 	return call.Class == ClassAmbiguous
+}
+
+func IsTransactionNotFound(err error) bool {
+	call, ok := err.(*ProviderCallError)
+	if !ok || call.Class != ClassReject || call.HTTPStat != 400 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(call.Message), "Transaction reference not found.")
 }
 
 type Provider interface {
