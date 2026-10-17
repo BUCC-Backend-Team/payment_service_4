@@ -2,6 +2,7 @@ package payments
 
 import (
 	"encoding/json"
+	"net/mail"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,6 +50,7 @@ func (h *apiHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	result, replayed, createErr := h.service.Create(r.Context(), req, strings.TrimSpace(idemKey))
 	if createErr != nil {
+		h.service.log.Error("payments: create payment failed", "orderId", req.OrderID, "error", createErr)
 		WriteError(w, createErr)
 		return
 	}
@@ -115,8 +117,13 @@ func validatedCreateRequest(body createPaymentBody) (CreateRequest, error) {
 }
 
 func validEmail(email string) bool {
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != email {
+		return false
+	}
+
 	at := strings.LastIndex(email, "@")
-	return at > 0 && at < len(email)-1 && !strings.ContainsAny(email, " \t\r\n")
+	return at > 0 && strings.Contains(email[at+1:], ".")
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, into any) bool {

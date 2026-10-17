@@ -213,6 +213,11 @@ func (s *Service) initialize(ctx context.Context, payment database.Payment, idem
 		CallbackURL: payment.ReturnUrl,
 	})
 	if err != nil {
+		if providers.IsRejection(err) {
+			if cleanupErr := s.expireFailedInitialization(ctx, payment, idemKey); cleanupErr != nil {
+				return CreateResult{}, fmt.Errorf("payments: initialize transaction: %w (cleanup failed: %v)", err, cleanupErr)
+			}
+		}
 		return CreateResult{}, fmt.Errorf("payments: initialize transaction: %w", err)
 	}
 
@@ -245,6 +250,26 @@ func (s *Service) initialize(ctx context.Context, payment database.Payment, idem
 	}
 
 	return result, nil
+}
+
+func (s *Service) expireFailedInitialization(ctx context.Context, payment database.Payment, idemKey string) error {
+	tx, err := s.store.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin initialization cleanup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	txStore := s.store.WithTx(tx)
+	if err := s.MarkExpired(ctx, txStore, payment); err != nil {
+		return fmt.Errorf("expire payment: %w", err)
+	}
+	if err := txStore.DeleteIdempotencyKey(ctx, PaymentScope(idemKey)); err != nil {
+		return fmt.Errorf("release idempotency key: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit initialization cleanup: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Payment, error) {

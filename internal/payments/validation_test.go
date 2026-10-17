@@ -8,7 +8,7 @@ func TestValidEmail(t *testing.T) {
 		want  bool
 	}{
 		{"buyer@example.com", true},
-		{"a@b", true},
+		{"a@b", false},
 		{"@example.com", false},
 		{"buyer@", false},
 		{"buyer @example.com", false},
