@@ -6,26 +6,62 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 )
 
+type CallbackOutbox struct {
+	ID            uuid.UUID
+	EventType     string
+	Payload       json.RawMessage
+	Status        string
+	Attempts      int32
+	NextAttemptAt time.Time
+	CreatedAt     time.Time
+	DeliveredAt   sql.NullTime
+}
+
+type IdempotencyKey struct {
+	Key            string
+	RequestHash    string
+	ResponseBody   string
+	ResponseStatus sql.NullInt32
+	UpdatedAt      time.Time
+}
+
 type Payment struct {
-	ID                uuid.UUID
-	IdempotencyKey    string
-	OrderID           string
-	Amount            int64
-	Currency          string
-	CustomerEmail     string
-	Status            string
-	Channel           sql.NullString
-	PaystackReference string
-	CheckoutUrl       sql.NullString
-	AccessCode        sql.NullString
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	ExpiresAt         sql.NullTime
-	SucceededAt       sql.NullTime
-	ExpiredAt         sql.NullTime
+	ID            uuid.UUID
+	OrderID       string
+	Amount        int64
+	Currency      string
+	CustomerEmail string
+	ReturnUrl     string
+	Status        string
+	Channel       sql.NullString
+	Reference     uuid.UUID
+	Late          bool
+	CheckoutUrl   sql.NullString
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	ExpiresAt     sql.NullTime
+	SucceededAt   sql.NullTime
+	ExpiredAt     sql.NullTime
+}
+
+type ProcessedWebhookEvent struct {
+	Key       string
+	CreatedAt time.Time
+}
+
+type Refund struct {
+	ID               uuid.UUID
+	PaymentID        uuid.UUID
+	Amount           int64
+	Status           string
+	PaystackRefundID sql.NullInt64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ProcessedAt      sql.NullTime
 }

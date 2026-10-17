@@ -1,14 +1,14 @@
 -- +goose Up
 CREATE TABLE IF NOT EXISTS payments (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    idempotency_key TEXT NOT NULL UNIQUE,
+    id UUID PRIMARY KEY,
     order_id TEXT NOT NULL,
     amount BIGINT NOT NULL CHECK (amount > 0),
     currency TEXT NOT NULL DEFAULT 'NGN' CHECK (currency = 'NGN'),
     customer_email TEXT NOT NULL,
+    return_url TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
         'pending',
-        'success',
+        'succeeded',
         'expired',
         'partially_refunded',
         'refunded'
@@ -19,22 +19,24 @@ CREATE TABLE IF NOT EXISTS payments (
         'bank_transfer',
         'ussd'
     )),
-    paystack_reference TEXT NOT NULL UNIQUE,
+    reference UUID NOT NULL UNIQUE,
+    late BOOLEAN NOT NULL DEFAULT FALSE,
     checkout_url TEXT,
-    access_code TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMP,
-    succeeded_at TIMESTAMP,
-    expired_at TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    succeeded_at TIMESTAMPTZ,
+    expired_at TIMESTAMPTZ
 );
 
-CREATE UNIQUE INDEX payments_one_active_per_order
+CREATE UNIQUE INDEX IF NOT EXISTS payments_one_active_per_order
     ON payments (order_id)
-    WHERE status = 'pending';
+    WHERE status IN ('pending', 'succeeded');
 
-CREATE INDEX payments_status_created_at_idx
+CREATE INDEX IF NOT EXISTS payments_status_created_at_idx
     ON payments (status, created_at);
 
 -- +goose Down
 DROP TABLE IF EXISTS payments;
+DROP INDEX IF EXISTS payments_one_active_per_order;
+DROP INDEX IF EXISTS payments_status_created_at_idx;

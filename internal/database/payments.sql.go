@@ -14,49 +14,54 @@ import (
 
 const createPayment = `-- name: CreatePayment :one
 INSERT INTO payments (
-    idempotency_key,
-    order_id,
-    amount,
-    currency,
-    customer_email,
-    paystack_reference
+    id, order_id, amount, currency, customer_email,
+    return_url, status, reference, expires_at
 )
-VALUES ($1, $2, $3, $4, $5, $6)
-ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, idempotency_key, order_id, amount, currency, customer_email, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING
+    id, order_id, amount, currency, customer_email,
+    return_url, status, channel, reference, late,
+    checkout_url, created_at, updated_at, expires_at,
+    succeeded_at, expired_at
 `
 
 type CreatePaymentParams struct {
-	IdempotencyKey    string
-	OrderID           string
-	Amount            int64
-	Currency          string
-	CustomerEmail     string
-	PaystackReference string
+	ID            uuid.UUID
+	OrderID       string
+	Amount        int64
+	Currency      string
+	CustomerEmail string
+	ReturnUrl     string
+	Status        string
+	Reference     uuid.UUID
+	ExpiresAt     sql.NullTime
 }
 
 func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (Payment, error) {
 	row := q.db.QueryRowContext(ctx, createPayment,
-		arg.IdempotencyKey,
+		arg.ID,
 		arg.OrderID,
 		arg.Amount,
 		arg.Currency,
 		arg.CustomerEmail,
-		arg.PaystackReference,
+		arg.ReturnUrl,
+		arg.Status,
+		arg.Reference,
+		arg.ExpiresAt,
 	)
 	var i Payment
 	err := row.Scan(
 		&i.ID,
-		&i.IdempotencyKey,
 		&i.OrderID,
 		&i.Amount,
 		&i.Currency,
 		&i.CustomerEmail,
+		&i.ReturnUrl,
 		&i.Status,
 		&i.Channel,
-		&i.PaystackReference,
+		&i.Reference,
+		&i.Late,
 		&i.CheckoutUrl,
-		&i.AccessCode,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
@@ -66,28 +71,31 @@ func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (P
 	return i, err
 }
 
-const getPaymentByIdempotencyKey = `-- name: GetPaymentByIdempotencyKey :one
-SELECT id, idempotency_key, order_id, amount, currency, customer_email, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+const getPaymentByID = `-- name: GetPaymentByID :one
+SELECT
+    id, order_id, amount, currency, customer_email,
+    return_url, status, channel, reference, late,
+    checkout_url, created_at, updated_at, expires_at,
+    succeeded_at, expired_at
 FROM payments
-WHERE idempotency_key = $1
-LIMIT 1
+WHERE id = $1
 `
 
-func (q *Queries) GetPaymentByIdempotencyKey(ctx context.Context, idempotencyKey string) (Payment, error) {
-	row := q.db.QueryRowContext(ctx, getPaymentByIdempotencyKey, idempotencyKey)
+func (q *Queries) GetPaymentByID(ctx context.Context, id uuid.UUID) (Payment, error) {
+	row := q.db.QueryRowContext(ctx, getPaymentByID, id)
 	var i Payment
 	err := row.Scan(
 		&i.ID,
-		&i.IdempotencyKey,
 		&i.OrderID,
 		&i.Amount,
 		&i.Currency,
 		&i.CustomerEmail,
+		&i.ReturnUrl,
 		&i.Status,
 		&i.Channel,
-		&i.PaystackReference,
+		&i.Reference,
+		&i.Late,
 		&i.CheckoutUrl,
-		&i.AccessCode,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ExpiresAt,
@@ -97,50 +105,226 @@ func (q *Queries) GetPaymentByIdempotencyKey(ctx context.Context, idempotencyKey
 	return i, err
 }
 
-const updatePaymentCheckout = `-- name: UpdatePaymentCheckout :one
-UPDATE payments
-SET
-    checkout_url = $2,
-    paystack_reference = $3,
-    access_code = $4,
-    updated_at = NOW()
+const getPaymentByIDForUpdate = `-- name: GetPaymentByIDForUpdate :one
+SELECT
+    id, order_id, amount, currency, customer_email,
+    return_url, status, channel, reference, late,
+    checkout_url, created_at, updated_at, expires_at,
+    succeeded_at, expired_at
+FROM payments
 WHERE id = $1
-    AND status = 'pending'
-RETURNING id, idempotency_key, order_id, amount, currency, customer_email, status, channel, paystack_reference, checkout_url, access_code, created_at, updated_at, expires_at, succeeded_at, expired_at
+FOR UPDATE
+`
+
+func (q *Queries) GetPaymentByIDForUpdate(ctx context.Context, id uuid.UUID) (Payment, error) {
+	row := q.db.QueryRowContext(ctx, getPaymentByIDForUpdate, id)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.OrderID,
+		&i.Amount,
+		&i.Currency,
+		&i.CustomerEmail,
+		&i.ReturnUrl,
+		&i.Status,
+		&i.Channel,
+		&i.Reference,
+		&i.Late,
+		&i.CheckoutUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+		&i.SucceededAt,
+		&i.ExpiredAt,
+	)
+	return i, err
+}
+
+const getPaymentByReference = `-- name: GetPaymentByReference :one
+SELECT
+    id, order_id, amount, currency, customer_email,
+    return_url, status, channel, reference, late,
+    checkout_url, created_at, updated_at, expires_at,
+    succeeded_at, expired_at
+FROM payments
+WHERE reference = $1
+`
+
+func (q *Queries) GetPaymentByReference(ctx context.Context, reference uuid.UUID) (Payment, error) {
+	row := q.db.QueryRowContext(ctx, getPaymentByReference, reference)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.OrderID,
+		&i.Amount,
+		&i.Currency,
+		&i.CustomerEmail,
+		&i.ReturnUrl,
+		&i.Status,
+		&i.Channel,
+		&i.Reference,
+		&i.Late,
+		&i.CheckoutUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+		&i.SucceededAt,
+		&i.ExpiredAt,
+	)
+	return i, err
+}
+
+const getPaymentByReferenceForUpdate = `-- name: GetPaymentByReferenceForUpdate :one
+SELECT
+    id, order_id, amount, currency, customer_email,
+    return_url, status, channel, reference, late,
+    checkout_url, created_at, updated_at, expires_at,
+    succeeded_at, expired_at
+FROM payments
+WHERE reference = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetPaymentByReferenceForUpdate(ctx context.Context, reference uuid.UUID) (Payment, error) {
+	row := q.db.QueryRowContext(ctx, getPaymentByReferenceForUpdate, reference)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.OrderID,
+		&i.Amount,
+		&i.Currency,
+		&i.CustomerEmail,
+		&i.ReturnUrl,
+		&i.Status,
+		&i.Channel,
+		&i.Reference,
+		&i.Late,
+		&i.CheckoutUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+		&i.SucceededAt,
+		&i.ExpiredAt,
+	)
+	return i, err
+}
+
+const listPendingPayments = `-- name: ListPendingPayments :many
+SELECT
+    id, order_id, amount, currency, customer_email,
+    return_url, status, channel, reference, late,
+    checkout_url, created_at, updated_at, expires_at,
+    succeeded_at, expired_at
+FROM payments
+WHERE status = 'pending'
+ORDER BY created_at
+LIMIT $1
+`
+
+func (q *Queries) ListPendingPayments(ctx context.Context, limit int32) ([]Payment, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingPayments, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderID,
+			&i.Amount,
+			&i.Currency,
+			&i.CustomerEmail,
+			&i.ReturnUrl,
+			&i.Status,
+			&i.Channel,
+			&i.Reference,
+			&i.Late,
+			&i.CheckoutUrl,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ExpiresAt,
+			&i.SucceededAt,
+			&i.ExpiredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markPaymentExpired = `-- name: MarkPaymentExpired :exec
+UPDATE payments
+SET status = 'expired',
+    expired_at = NOW(),
+    updated_at = NOW()
+WHERE id = $1 AND status = 'pending'
+`
+
+func (q *Queries) MarkPaymentExpired(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, markPaymentExpired, id)
+	return err
+}
+
+const markPaymentSucceeded = `-- name: MarkPaymentSucceeded :exec
+UPDATE payments
+SET status = 'succeeded',
+    channel = $3,
+    late = $2,
+    succeeded_at = NOW(),
+    updated_at = NOW()
+WHERE id = $1 AND status IN ('pending', 'expired')
+`
+
+type MarkPaymentSucceededParams struct {
+	ID      uuid.UUID
+	Late    bool
+	Channel sql.NullString
+}
+
+func (q *Queries) MarkPaymentSucceeded(ctx context.Context, arg MarkPaymentSucceededParams) error {
+	_, err := q.db.ExecContext(ctx, markPaymentSucceeded, arg.ID, arg.Late, arg.Channel)
+	return err
+}
+
+const setPaymentRefundState = `-- name: SetPaymentRefundState :exec
+UPDATE payments
+SET status = CASE WHEN $2 >= amount THEN 'refunded'
+                  ELSE 'partially_refunded' END,
+    updated_at = NOW()
+WHERE id = $1 AND status IN ('succeeded', 'partially_refunded')
+`
+
+type SetPaymentRefundStateParams struct {
+	ID     uuid.UUID
+	Amount int64
+}
+
+func (q *Queries) SetPaymentRefundState(ctx context.Context, arg SetPaymentRefundStateParams) error {
+	_, err := q.db.ExecContext(ctx, setPaymentRefundState, arg.ID, arg.Amount)
+	return err
+}
+
+const updatePaymentCheckout = `-- name: UpdatePaymentCheckout :exec
+UPDATE payments
+SET checkout_url = $2, updated_at = NOW()
+WHERE id = $1
 `
 
 type UpdatePaymentCheckoutParams struct {
-	ID                uuid.UUID
-	CheckoutUrl       sql.NullString
-	PaystackReference string
-	AccessCode        sql.NullString
+	ID          uuid.UUID
+	CheckoutUrl sql.NullString
 }
 
-func (q *Queries) UpdatePaymentCheckout(ctx context.Context, arg UpdatePaymentCheckoutParams) (Payment, error) {
-	row := q.db.QueryRowContext(ctx, updatePaymentCheckout,
-		arg.ID,
-		arg.CheckoutUrl,
-		arg.PaystackReference,
-		arg.AccessCode,
-	)
-	var i Payment
-	err := row.Scan(
-		&i.ID,
-		&i.IdempotencyKey,
-		&i.OrderID,
-		&i.Amount,
-		&i.Currency,
-		&i.CustomerEmail,
-		&i.Status,
-		&i.Channel,
-		&i.PaystackReference,
-		&i.CheckoutUrl,
-		&i.AccessCode,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ExpiresAt,
-		&i.SucceededAt,
-		&i.ExpiredAt,
-	)
-	return i, err
+func (q *Queries) UpdatePaymentCheckout(ctx context.Context, arg UpdatePaymentCheckoutParams) error {
+	_, err := q.db.ExecContext(ctx, updatePaymentCheckout, arg.ID, arg.CheckoutUrl)
+	return err
 }
