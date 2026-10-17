@@ -25,6 +25,7 @@ const (
 	StatusPending   = "pending"
 	StatusProcessed = "processed"
 	StatusFailed    = "failed"
+	minimumAmount   = int64(5000)
 
 	refundCallWait    = 10 * time.Second
 	refundPollEvery   = 40 * time.Millisecond
@@ -64,6 +65,9 @@ func (s *Service) Create(ctx context.Context, paymentID uuid.UUID, idemKey strin
 	}
 	if amount < 0 {
 		return Result{}, false, apperrors.New(http.StatusBadRequest, "invalid_amount", "amount must be a positive integer of kobo")
+	}
+	if amount > 0 && amount < minimumAmount {
+		return Result{}, false, apperrors.New(http.StatusBadRequest, "refund_below_minimum", "Refund amount must be at least 5000 kobo (NGN 50)")
 	}
 
 	bodyHash := requestHash(strconv.FormatInt(amount, 10))
@@ -143,6 +147,9 @@ func (s *Service) insertRefund(ctx context.Context, paymentID uuid.UUID, key str
 	}
 	if amount > remaining {
 		return Result{}, apperrors.New(http.StatusConflict, "not_refundable", "Requested refund exceeds the remaining balance")
+	}
+	if amount < minimumAmount {
+		return Result{}, apperrors.New(http.StatusConflict, "refund_below_minimum", "Refund amount must be at least 5000 kobo (NGN 50)")
 	}
 
 	refundID := uuid.New()
