@@ -4,9 +4,8 @@ import (
 	"fmt"
 )
 
-
 type PaystackEvent struct {
-	Event string `json:"event"`
+	Event string    `json:"event"`
 	Data  EventData `json:"data"`
 }
 
@@ -15,12 +14,11 @@ type EventData struct {
 	Reference            string `json:"reference"`
 	TransactionReference string `json:"transaction_reference"`
 	Amount               int64  `json:"amount"`
-	Transaction struct {
+	Transaction          struct {
 		Reference string `json:"reference"`
 		Amount    int64  `json:"amount"`
 	} `json:"transaction"`
 }
-
 
 func (d EventData) TransactionReferenceOf() string {
 	if d.TransactionReference != "" {
@@ -31,7 +29,6 @@ func (d EventData) TransactionReferenceOf() string {
 	}
 	return d.Reference
 }
-
 
 func (d EventData) RefundAmount() int64 {
 	if d.Amount > 0 {

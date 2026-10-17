@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/uuid"
 
-	apperrors "github.com/BUCC-Backend-Team/payment_service_4/internal/errors"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/database"
+	apperrors "github.com/BUCC-Backend-Team/payment_service_4/internal/errors"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/payments"
 	"github.com/BUCC-Backend-Team/payment_service_4/internal/providers"
 )
